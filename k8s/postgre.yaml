@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: db
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: postgres
+
+  template:
+    metadata:
+      labels:
+        app: postgres
+
+    spec:
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        - name: init-permissions
+          image: alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - FOWNER
+                - DAC_OVERRIDE
+
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/lib/postgresql/data
+              mkdir -p /var/run/postgresql
+              mkdir -p /var/lib/postgresql/wal-archive
+              mkdir -p /var/lib/postgresql/base-backups
+
+              find /var/lib/postgresql/data ! -user 70 -exec chown 70:70 {} +
+
+              chown 70:70 /var/lib/postgresql/data
+              chown 70:70 /var/run/postgresql
+              chown 70:70 /var/lib/postgresql/wal-archive
+              chown 70:70 /var/lib/postgresql/base-backups
+
+              chmod 700 /var/lib/postgresql/data
+              chmod 3775 /var/run/postgresql
+              chmod 700 /var/lib/postgresql/wal-archive
+              chmod 700 /var/lib/postgresql/base-backups
+
+              echo "PostgreSQL volume permissions initialized"
+
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+            - name: postgres-run
+              mountPath: /var/run/postgresql
+
+            - name: wal-archive
+              mountPath: /var/lib/postgresql/wal-archive
+
+            - name: base-backups
+              mountPath: /var/lib/postgresql/base-backups
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+
+          args:
+            - "-c"
+            - "archive_mode=on"
+            - "-c"
+            - "archive_command=test ! -f /var/lib/postgresql/wal-archive/%f && cp %p /var/lib/postgresql/wal-archive/%f"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          ports:
+            - containerPort: 5432
+
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - finance
+                - -d
+                - finance
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - finance
+                - -d
+                - finance
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          env:
+            - name: POSTGRES_DB
+              value: finance
+
+            - name: POSTGRES_USER
+              value: finance
+
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+            - name: postgres-run
+              mountPath: /var/run/postgresql
+
+            - name: tmp
+              mountPath: /tmp
+
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d/001-init.sql
+              subPath: init.sql
+
+            - name: wal-archive
+              mountPath: /var/lib/postgresql/wal-archive
+
+            - name: base-backups
+              mountPath: /var/lib/postgresql/base-backups
+
+      volumes:
+        - name: postgres-run
+          emptyDir: {}
+
+        - name: tmp
+          emptyDir: {}
+
+        - name: init-sql
+          configMap:
+            name: postgres-init
+
+        - name: wal-archive
+          persistentVolumeClaim:
+            claimName: postgres-wal-archive
+
+        - name: base-backups
+          persistentVolumeClaim:
+            claimName: postgres-base-backups
+
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        resources:
+          requests:
+            storage: 5Gi
