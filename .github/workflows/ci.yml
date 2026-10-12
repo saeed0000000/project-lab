@@ -1,0 +1,21 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Backend install
+        working-directory: backend
+        run: npm install
+      - name: Frontend install and build
+        working-directory: frontend
+        run: npm install && npm run build
+      - name: Build Docker images
+        run: docker build -t finance-api ./backend && docker build -t finance-web ./frontend
