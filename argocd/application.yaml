@@ -1,13 +1,13 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: finance-app
+  name: project-app
   namespace: argocd
 spec:
   project: default
 
   source:
-    repoURL: https://github.com/saeed0000000/finance-devops-lab.git
+    repoURL: https://github.com/saeed0000000/project-lab.git
     targetRevision: main
     path: k8s
 
