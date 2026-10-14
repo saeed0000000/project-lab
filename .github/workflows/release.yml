@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Extract and validate version
+        id: version
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF#refs/tags/}"
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $VERSION"
+            echo "Expected format: vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          echo "Release version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker images
+        run: |
+          set -euo pipefail
+
+          docker build \
+            -t "finance-api:${{ steps.version.outputs.version }}" \
+            ./backend
+
+          docker build \
+            -t "finance-web:${{ steps.version.outputs.version }}" \
+            ./frontend
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: finance-api:${{ steps.version.outputs.version }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: finance-web:${{ steps.version.outputs.version }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag images for GHCR
+        run: |
+          set -euo pipefail
+
+          docker tag \
+            "finance-api:${{ steps.version.outputs.version }}" \
+            "ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${{ steps.version.outputs.version }}"
+
+          docker tag \
+            "finance-web:${{ steps.version.outputs.version }}" \
+            "ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${{ steps.version.outputs.version }}"
+
+      - name: Push images to GHCR
+        run: |
+          set -euo pipefail
+
+          docker push \
+            "ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${{ steps.version.outputs.version }}"
+
+          docker push \
+            "ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${{ steps.version.outputs.version }}"
+
+      - name: Resolve and validate image digests
+        id: digest
+        run: |
+          set -euo pipefail
+
+          API_IMAGE="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${{ steps.version.outputs.version }}"
+          WEB_IMAGE="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${{ steps.version.outputs.version }}"
+
+          API_DIGEST="$(
+            docker buildx imagetools inspect "$API_IMAGE" |
+              awk '$1 == "Digest:" {print $2; exit}'
+          )"
+
+          WEB_DIGEST="$(
+            docker buildx imagetools inspect "$WEB_IMAGE" |
+              awk '$1 == "Digest:" {print $2; exit}'
+          )"
+
+          echo "Backend digest:  $API_DIGEST"
+          echo "Frontend digest: $WEB_DIGEST"
+
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+
+          echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Update Kubernetes manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          API_DIGEST: ${{ steps.digest.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.digest.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+
+          API_REPO="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api"
+          WEB_REPO="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web"
+
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*)${API_REPO}.*$|\1${API_REPO}:${VERSION}@${API_DIGEST}|" \
+            k8s/backend.yaml
+
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*)${WEB_REPO}.*$|\1${WEB_REPO}:${VERSION}@${WEB_DIGEST}|" \
+            k8s/frontend.yaml
+
+          echo "=== UPDATED APPLICATION IMAGES ==="
+
+          grep -n "image:" k8s/backend.yaml
+          grep -n "image:" k8s/frontend.yaml
+
+      - name: Validate GitOps manifests
+        run: |
+          set -euo pipefail
+
+          git diff --check
+
+          .github/scripts/verify-image-digests.sh
+
+      - name: Show release manifest diff
+        run: |
+          git --no-pager diff -- k8s/backend.yaml k8s/frontend.yaml
+
+      - name: Commit manifest update
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- k8s/backend.yaml k8s/frontend.yaml; then
+            echo "ERROR: Kubernetes manifests were not changed."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add k8s/backend.yaml k8s/frontend.yaml
+
+          git commit \
+            -m "release: deploy ${VERSION}"
+
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

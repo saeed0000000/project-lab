@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/ci.yml'
+
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Backend install
+        working-directory: backend
+        run: npm ci
+
+      - name: Frontend install and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Docker images
+        run: |
+          set -euo pipefail
+
+          docker build \
+            -t finance-api:${{ github.sha }} \
+            ./backend
+
+          docker build \
+            -t finance-web:${{ github.sha }} \
+            ./frontend
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: 'finance-api:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: 'finance-web:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag images for GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+
+          docker tag \
+            finance-api:${{ github.sha }} \
+            ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${{ github.sha }}
+
+          docker tag \
+            finance-web:${{ github.sha }} \
+            ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${{ github.sha }}
+
+      - name: Push backend image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+
+          docker push \
+            ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${{ github.sha }}
+
+      - name: Push frontend image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+
+          docker push \
+            ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${{ github.sha }}
+
+      - name: Resolve immutable image digests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: image-digests
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          API_IMAGE="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api:${IMAGE_TAG}"
+          WEB_IMAGE="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web:${IMAGE_TAG}"
+
+          echo "=== Resolving Backend Digest ==="
+
+          API_DIGEST="$(
+            docker buildx imagetools inspect "$API_IMAGE" |
+              awk '$1 == "Digest:" {print $2; exit}'
+          )"
+
+          echo "=== Resolving Frontend Digest ==="
+
+          WEB_DIGEST="$(
+            docker buildx imagetools inspect "$WEB_IMAGE" |
+              awk '$1 == "Digest:" {print $2; exit}'
+          )"
+
+          echo "Backend digest:  $API_DIGEST"
+          echo "Frontend digest: $WEB_DIGEST"
+
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+
+          echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Update immutable image references
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          API_DIGEST: ${{ steps.image-digests.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.image-digests.outputs.web_digest }}
+        run: |
+          set -euo pipefail
+
+          API_REPOSITORY="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-api"
+          WEB_REPOSITORY="ghcr.io/${{ github.repository_owner }}/finance-devops-lab-web"
+
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*)${API_REPOSITORY}.*$|\1${API_REPOSITORY}:${IMAGE_TAG}@${API_DIGEST}|" \
+            k8s/backend.yaml
+
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*)${WEB_REPOSITORY}.*$|\1${WEB_REPOSITORY}:${IMAGE_TAG}@${WEB_DIGEST}|" \
+            k8s/frontend.yaml
+
+          echo "=== UPDATED BACKEND IMAGE ==="
+          grep -n "image:" k8s/backend.yaml
+
+          echo
+          echo "=== UPDATED FRONTEND IMAGE ==="
+          grep -n "image:" k8s/frontend.yaml
+
+          echo
+          echo "=== DIFF CHECK ==="
+          git diff --check
+
+          echo
+          echo "=== MANIFEST DIFF ==="
+          git diff -- k8s/backend.yaml k8s/frontend.yaml
+
+          if git diff --quiet -- k8s/backend.yaml k8s/frontend.yaml; then
+            echo "No manifest changes detected."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add k8s/backend.yaml k8s/frontend.yaml
+
+          git commit -m "chore: pin application images by digest"
+
+          git push origin HEAD:main
