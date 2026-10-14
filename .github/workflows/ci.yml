@@ -1,18 +1,23 @@
-name: CI/CD
+
+name: CI
 
 on:
   pull_request:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'k8s/**'
       - '.github/workflows/ci.yml'
+      - '.github/scripts/**'
 
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'backend/**'
       - 'frontend/**'
       - '.github/workflows/ci.yml'
+      - '.github/scripts/**'
 
 permissions:
   contents: read
@@ -22,25 +27,25 @@ jobs:
     name: Build and Security Scan
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
-      - name: Backend install
+      - name: Install backend dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Frontend install and build
+      - name: Install frontend dependencies and build
         working-directory: frontend
         run: |
+          set -euo pipefail
           npm ci
           npm run build
 
@@ -49,11 +54,11 @@ jobs:
           set -euo pipefail
 
           docker build \
-            -t finance-api:${{ github.sha }} \
+            --tag "finance-api:${GITHUB_SHA}" \
             ./backend
 
           docker build \
-            -t finance-web:${{ github.sha }} \
+            --tag "finance-web:${GITHUB_SHA}" \
             ./frontend
 
       - name: Scan backend image
@@ -76,10 +81,35 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
 
+      - name: Detect changed Kubernetes manifests
+        if: github.event_name == 'pull_request'
+        id: manifest-changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" |
+            grep -Eq '^k8s/.*\.ya?ml$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify image digests on pull request
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.manifest-changes.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          test -f .github/scripts/verify-image-digests.sh
+          bash .github/scripts/verify-image-digests.sh
+
   publish:
     name: Publish Images and Update GitOps
     runs-on: ubuntu-latest
-
     needs: validate
 
     if: >-
@@ -92,12 +122,89 @@ jobs:
 
     env:
       IMAGE_TAG: ${{ github.sha }}
-      API_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-api
-      WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-web
 
     steps:
-      - name: Checkout code
+      - name: Checkout main
         uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Discover image repositories
+        id: discover-images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          PROJECT="${GITHUB_REPOSITORY#*/}"
+
+          OWNER="${OWNER,,}"
+          PROJECT="${PROJECT,,}"
+
+          discover_from_manifest() {
+            local manifest="$1"
+            local image_ref=""
+
+            image_ref="$(
+              awk '$1 == "image:" {print $2; exit}' "$manifest"
+            )"
+
+            # Handle optionally quoted image references.
+            image_ref="${image_ref#\"}"
+            image_ref="${image_ref%\"}"
+            image_ref="${image_ref#\'}"
+            image_ref="${image_ref%\'}"
+            image_ref="${image_ref,,}"
+
+            # Reuse only GHCR repositories under this project owner.
+            if [[ "$image_ref" == "ghcr.io/${OWNER}/"* ]]; then
+              image_ref="${image_ref%%@*}"
+              image_ref="${image_ref%:*}"
+
+              printf '%s\n' "$image_ref"
+              return 0
+            fi
+
+            return 1
+          }
+
+          API_REPOSITORY="$(
+            discover_from_manifest k8s/backend.yaml || true
+          )"
+
+          WEB_REPOSITORY="$(
+            discover_from_manifest k8s/frontend.yaml || true
+          )"
+
+          # If one manifest identifies the image naming convention,
+          # derive its API/web counterpart when it follows the convention.
+          if [[ -z "$WEB_REPOSITORY" &&
+                "$API_REPOSITORY" == *-api ]]; then
+            WEB_REPOSITORY="${API_REPOSITORY%-api}-web"
+          fi
+
+          if [[ -z "$API_REPOSITORY" &&
+                "$WEB_REPOSITORY" == *-web ]]; then
+            API_REPOSITORY="${WEB_REPOSITORY%-web}-api"
+          fi
+
+          # Generic fallback for repositories with placeholder images.
+          if [[ -z "$API_REPOSITORY" ]]; then
+            API_REPOSITORY="ghcr.io/${OWNER}/${PROJECT}-api"
+          fi
+
+          if [[ -z "$WEB_REPOSITORY" ]]; then
+            WEB_REPOSITORY="ghcr.io/${OWNER}/${PROJECT}-web"
+          fi
+
+          {
+            echo "API_REPOSITORY=$API_REPOSITORY"
+            echo "WEB_REPOSITORY=$WEB_REPOSITORY"
+          } >> "$GITHUB_ENV"
+
+          echo "Backend image repository:  $API_REPOSITORY"
+          echo "Frontend image repository: $WEB_REPOSITORY"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -107,7 +214,7 @@ jobs:
           set -euo pipefail
 
           docker build \
-            -t "${API_IMAGE}:${IMAGE_TAG}" \
+            --tag "finance-api:${IMAGE_TAG}" \
             ./backend
 
       - name: Build frontend image
@@ -115,13 +222,13 @@ jobs:
           set -euo pipefail
 
           docker build \
-            -t "${WEB_IMAGE}:${IMAGE_TAG}" \
+            --tag "finance-web:${IMAGE_TAG}" \
             ./frontend
 
       - name: Scan backend image before publishing
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/finance-api:${{ github.sha }}
+          image-ref: finance-api:${{ github.sha }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
@@ -131,26 +238,41 @@ jobs:
       - name: Scan frontend image before publishing
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/finance-web:${{ github.sha }}
+          image-ref: finance-web:${{ github.sha }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
 
-      - name: Log in to GHCR
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push images
+      - name: Tag images for GHCR
         run: |
           set -euo pipefail
 
-          docker push "${API_IMAGE}:${IMAGE_TAG}"
-          docker push "${WEB_IMAGE}:${IMAGE_TAG}"
+          docker tag \
+            "finance-api:${IMAGE_TAG}" \
+            "${API_REPOSITORY}:${IMAGE_TAG}"
+
+          docker tag \
+            "finance-web:${IMAGE_TAG}" \
+            "${WEB_REPOSITORY}:${IMAGE_TAG}"
+
+      - name: Push backend image
+        run: |
+          set -euo pipefail
+          docker push "${API_REPOSITORY}:${IMAGE_TAG}"
+
+      - name: Push frontend image
+        run: |
+          set -euo pipefail
+          docker push "${WEB_REPOSITORY}:${IMAGE_TAG}"
 
       - name: Resolve immutable image digests
         id: image-digests
@@ -158,17 +280,27 @@ jobs:
           set -euo pipefail
 
           API_DIGEST="$(
-            docker buildx imagetools inspect "${API_IMAGE}:${IMAGE_TAG}" |
+            docker buildx imagetools inspect "${API_REPOSITORY}:${IMAGE_TAG}" |
               awk '$1 == "Digest:" {print $2; exit}'
           )"
 
           WEB_DIGEST="$(
-            docker buildx imagetools inspect "${WEB_IMAGE}:${IMAGE_TAG}" |
+            docker buildx imagetools inspect "${WEB_REPOSITORY}:${IMAGE_TAG}" |
               awk '$1 == "Digest:" {print $2; exit}'
           )"
 
-          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          if [[ ! "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "ERROR: Invalid backend image digest: $API_DIGEST"
+            exit 1
+          fi
+
+          if [[ ! "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "ERROR: Invalid frontend image digest: $WEB_DIGEST"
+            exit 1
+          fi
+
+          echo "Backend digest:  $API_DIGEST"
+          echo "Frontend digest: $WEB_DIGEST"
 
           echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
           echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
@@ -180,25 +312,53 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fail safely if the manifests contain more than one image.
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]]
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]]
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
 
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/backend.yaml"
+            exit 1
+          }
+
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/frontend.yaml"
+            exit 1
+          }
+
+          # Replace the complete image line, regardless of the old value.
           sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_IMAGE}:${IMAGE_TAG}@${API_DIGEST}|" \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_REPOSITORY}:${IMAGE_TAG}@${API_DIGEST}|" \
             k8s/backend.yaml
 
           sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_IMAGE}:${IMAGE_TAG}@${WEB_DIGEST}|" \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_REPOSITORY}:${IMAGE_TAG}@${WEB_DIGEST}|" \
             k8s/frontend.yaml
-
-          git diff --check
 
           echo "=== BACKEND IMAGE ==="
           grep -n 'image:' k8s/backend.yaml
 
           echo "=== FRONTEND IMAGE ==="
           grep -n 'image:' k8s/frontend.yaml
+
+          grep -F \
+            "image: ${API_REPOSITORY}:${IMAGE_TAG}@${API_DIGEST}" \
+            k8s/backend.yaml
+
+          grep -F \
+            "image: ${WEB_REPOSITORY}:${IMAGE_TAG}@${WEB_DIGEST}" \
+            k8s/frontend.yaml
+
+          git diff --check
+
+          echo "=== MANIFEST DIFF ==="
+          git --no-pager diff -- k8s/backend.yaml k8s/frontend.yaml
+
+      - name: Verify all Kubernetes image digests
+        run: |
+          set -euo pipefail
+
+          test -f .github/scripts/verify-image-digests.sh
+          bash .github/scripts/verify-image-digests.sh
 
       - name: Commit and push GitOps changes
         run: |
@@ -210,11 +370,11 @@ jobs:
           fi
 
           git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add k8s/backend.yaml k8s/frontend.yaml
 
-          git commit -m "chore: pin application images by digest"
+          git commit \
+            -m "chore: pin application images by digest"
 
           git push origin HEAD:main
