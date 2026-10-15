@@ -1,0 +1,209 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, Scan, Publish and Propose GitOps Update
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    permissions:
+      contents: write
+      packages: write
+
+    env:
+      VERSION: ${{ github.ref_name }}
+      API_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-api
+      WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-web
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Invalid release tag: $VERSION"
+            echo "Expected format: vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
+          TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "ERROR: Release tags must point to a commit contained in main."
+            echo "Tag commit: $TAG_COMMIT"
+            exit 1
+          fi
+
+          echo "Validated release $VERSION from commit $TAG_COMMIT on main."
+
+      - name: Create GitHub App token for CI-triggering pull request
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: project-lab
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        run: |
+          set -euo pipefail
+          docker build --tag "${API_IMAGE}:${VERSION}" ./backend
+
+      - name: Build frontend image
+        run: |
+          set -euo pipefail
+          docker build --tag "${WEB_IMAGE}:${VERSION}" ./frontend
+
+      - name: Scan backend image before publishing
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.API_IMAGE }}:${{ env.VERSION }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Scan frontend image before publishing
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.WEB_IMAGE }}:${{ env.VERSION }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push versioned images
+        run: |
+          set -euo pipefail
+          docker push "${API_IMAGE}:${VERSION}"
+          docker push "${WEB_IMAGE}:${VERSION}"
+
+      - name: Resolve and validate image digests
+        id: digest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_DIGEST="$(docker buildx imagetools inspect "${API_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+          WEB_DIGEST="$(docker buildx imagetools inspect "${WEB_IMAGE}:${VERSION}" | awk '$1 == "Digest:" {print $2; exit}')"
+
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "ERROR: Invalid backend image digest: $API_DIGEST"
+            exit 1
+          }
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "ERROR: Invalid frontend image digest: $WEB_DIGEST"
+            exit 1
+          }
+
+          echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Backend image:  ${API_IMAGE}:${VERSION}@${API_DIGEST}"
+          echo "Frontend image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}"
+
+      - name: Check out current main for GitOps update
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git checkout -B release-manifest-update origin/main
+
+      - name: Update Kubernetes image references
+        env:
+          API_DIGEST: ${{ steps.digest.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.digest.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/backend.yaml"
+            exit 1
+          }
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/frontend.yaml"
+            exit 1
+          }
+
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_IMAGE}:${VERSION}@${API_DIGEST}|" \
+            k8s/backend.yaml
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}|" \
+            k8s/frontend.yaml
+
+          grep -F "image: ${API_IMAGE}:${VERSION}@${API_DIGEST}" k8s/backend.yaml
+          grep -F "image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}" k8s/frontend.yaml
+
+          git diff --check
+          bash .github/scripts/verify-image-digests.sh
+
+          echo "=== Proposed GitOps diff ==="
+          git --no-pager diff -- k8s/backend.yaml k8s/frontend.yaml
+
+      - name: Open GitOps pull request
+        id: gitops-pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: automation/deploy-${{ env.VERSION }}
+          base: main
+          delete-branch: true
+          add-paths: |
+            k8s/backend.yaml
+            k8s/frontend.yaml
+          commit-message: "release: propose deployment of ${{ env.VERSION }}"
+          title: "deploy: ${{ env.VERSION }}"
+          body: |
+            ## GitOps deployment proposal
+
+            This pull request updates the application image references to the immutable digests built from release tag `${{ env.VERSION }}`.
+
+            - Backend: `${{ env.API_IMAGE }}:${{ env.VERSION }}@${{ steps.digest.outputs.api_digest }}`
+            - Frontend: `${{ env.WEB_IMAGE }}:${{ env.VERSION }}@${{ steps.digest.outputs.web_digest }}`
+
+            Please review the manifest diff and required CI checks before merging. Argo CD tracks `main`, so the deployment becomes desired state only after this pull request is merged.
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: false
+          make_latest: true
