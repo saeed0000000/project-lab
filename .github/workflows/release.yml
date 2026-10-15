@@ -139,8 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin main:refs/remotes/origin/main
-          git checkout -B release-manifest-update origin/main
-
+          git checkout -B main origin/main
       - name: Update Kubernetes image references
         env:
           API_DIGEST: ${{ steps.digest.outputs.api_digest }}
