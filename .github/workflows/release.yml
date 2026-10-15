@@ -45,6 +45,55 @@ jobs:
 
           echo "Release version: $VERSION"
 
+
+
+      - name: Detect target branch from release tag
+        id: target-branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Fetch all remote branches so the tag commit can be located.
+          git fetch --prune origin \
+            '+refs/heads/*:refs/remotes/origin/*'
+
+          TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+
+          # Find branches whose history contains the tagged commit.
+          mapfile -t MATCHING_BRANCHES < <(
+            while IFS= read -r remote_ref; do
+              [[ "$remote_ref" == "origin/HEAD" ]] && continue
+
+              if git merge-base --is-ancestor \
+                "$TAG_COMMIT" "$remote_ref"; then
+                printf '%s\n' "${remote_ref#origin/}"
+              fi
+            done < <(
+              git for-each-ref \
+                --format='%(refname:short)' \
+                refs/remotes/origin
+            )
+          )
+
+          # Never guess if the tag belongs to multiple branches.
+          if [[ "${#MATCHING_BRANCHES[@]}" -ne 1 ]]; then
+            echo "ERROR: Cannot uniquely identify the source branch."
+            echo "Tag commit: $TAG_COMMIT"
+            echo "Matching branches:"
+            printf '  %s\n' "${MATCHING_BRANCHES[@]}"
+            echo "Tag a commit belonging to exactly one branch, or choose the target explicitly."
+            exit 1
+          fi
+
+          TARGET_BRANCH="${MATCHING_BRANCHES[0]}"
+
+          echo "Detected branch: $TARGET_BRANCH"
+          echo "target_branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "TARGET_BRANCH=$TARGET_BRANCH" >> "$GITHUB_ENV"
+
+
+
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -129,12 +178,15 @@ jobs:
           echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
           echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout latest main for GitOps update
+
+
+      - name: Checkout detected branch for GitOps update
         run: |
           set -euo pipefail
 
-          git fetch --no-tags origin test-ci-workflow
-          git checkout -B release-manifest-update origin/test-ci-workflow
+          git fetch --no-tags origin "$TARGET_BRANCH"
+          git checkout -B release-manifest-update "origin/$TARGET_BRANCH"
+
 
       - name: Update Kubernetes image references
         env:
@@ -229,3 +281,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ steps.target-branch.outputs.target_branch != 'main' }}
+          make_latest: false
