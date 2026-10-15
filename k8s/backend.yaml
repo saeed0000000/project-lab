@@ -29,7 +29,7 @@ spec:
 
       containers:
         - name: backend
-          image: mycode:lastet
+          image: ghcr.io/saeed0000000/finance-api:v1.0.5@sha256:7d7ab2f4e1d2e02adfa4e232ecaa4956f88c302aef6e0dcbe3fca95e27023113
           imagePullPolicy: IfNotPresent
 
           securityContext:
