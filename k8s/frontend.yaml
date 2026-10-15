@@ -30,7 +30,7 @@ spec:
 
       containers:
         - name: frontend
-          image: ghcr.io/saeed0000000/finance-web:efb63d9695661deb755fa4f00384415947e74ea8@sha256:05e3fe2006fdf8b0a07452a1bfc1630e839721d44ddf47a05f61a4a48d968cf0
+          image: ghcr.io/saeed0000000/finance-web:v1.0.8-rc.2@sha256:afdd91884d60d7a0c50f5deda2babb352ee7e5ee82d985eb51f8bb8184ad40cd
           imagePullPolicy: IfNotPresent
 
           securityContext:
