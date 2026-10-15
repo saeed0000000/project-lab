@@ -143,27 +143,54 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Validate the image digests before updating manifests.
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "ERROR: Invalid backend image digest"
+            exit 1
+          }
+
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "ERROR: Invalid frontend image digest"
+            exit 1
+          }
+
           # Ensure each manifest contains exactly one application image.
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]]
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]]
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/backend.yaml"
+            exit 1
+          }
 
-          # Update only the intended image repository.
-          grep -Eq "^[[:space:]]*image:[[:space:]]*${API_IMAGE}([:@]|$)" k8s/backend.yaml
-          grep -Eq "^[[:space:]]*image:[[:space:]]*${WEB_IMAGE}([:@]|$)" k8s/frontend.yaml
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in k8s/frontend.yaml"
+            exit 1
+          }
 
+          # Replace the entire image line regardless of its previous value.
           sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*)${API_IMAGE}.*$|\1${API_IMAGE}:${VERSION}@${API_DIGEST}|" \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_IMAGE}:${VERSION}@${API_DIGEST}|" \
             k8s/backend.yaml
 
           sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*)${WEB_IMAGE}.*$|\1${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}|" \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}|" \
             k8s/frontend.yaml
 
-          # Verify the final references exactly.
-          grep -F "image: ${API_IMAGE}:${VERSION}@${API_DIGEST}" k8s/backend.yaml
-          grep -F "image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}" k8s/frontend.yaml
+          # Verify the resulting image references.
+          grep -F \
+            "image: ${API_IMAGE}:${VERSION}@${API_DIGEST}" \
+            k8s/backend.yaml
+
+          grep -F \
+            "image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}" \
+            k8s/frontend.yaml
 
           git diff --check
+
+          echo "=== UPDATED BACKEND IMAGE ==="
+          grep -n 'image:' k8s/backend.yaml
+
+          echo "=== UPDATED FRONTEND IMAGE ==="
+          grep -n 'image:' k8s/frontend.yaml
+
 
       - name: Validate all Kubernetes image digests
         run: |
@@ -196,7 +223,7 @@ jobs:
           git add k8s/backend.yaml k8s/frontend.yaml
           git commit -m "release: deploy ${VERSION}"
 
-          git push origin HEAD:main
+          git push origin HEAD:test-ci-workflow
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
