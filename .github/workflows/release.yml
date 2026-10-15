@@ -133,8 +133,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch --no-tags origin main
-          git checkout -B release-manifest-update origin/main
+          git fetch --no-tags origin test-ci-workflow
+          git checkout -B release-manifest-update origin/test-ci-workflow
 
       - name: Update Kubernetes image references
         env:
