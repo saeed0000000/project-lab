@@ -1,29 +1,40 @@
-name: CI/CD
+name: CI
 
 on:
   pull_request:
+    branches:
+      - main
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'k8s/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.github/scripts/**'
 
   push:
-    branches: [main]
+    branches:
+      - '**'
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'k8s/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.github/scripts/**'
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     name: Build and Security Scan
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
+    timeout-minutes: 25
 
     steps:
       - name: Checkout code
@@ -33,14 +44,19 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
 
-      - name: Backend install
+      - name: Install backend dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Frontend install and build
+      - name: Install frontend dependencies and build
         working-directory: frontend
         run: |
+          set -euo pipefail
           npm ci
           npm run build
 
@@ -49,11 +65,11 @@ jobs:
           set -euo pipefail
 
           docker build \
-            -t finance-api:${{ github.sha }} \
+            --tag "finance-api:${GITHUB_SHA}" \
             ./backend
 
           docker build \
-            -t finance-web:${{ github.sha }} \
+            --tag "finance-web:${GITHUB_SHA}" \
             ./frontend
 
       - name: Scan backend image
@@ -76,145 +92,8 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
 
-  publish:
-    name: Publish Images and Update GitOps
-    runs-on: ubuntu-latest
-
-    needs: validate
-
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main'
-
-    permissions:
-      contents: write
-      packages: write
-
-    env:
-      IMAGE_TAG: ${{ github.sha }}
-      API_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-api
-      WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-web
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build backend image
+      - name: Verify Kubernetes image digests
         run: |
           set -euo pipefail
-
-          docker build \
-            -t "${API_IMAGE}:${IMAGE_TAG}" \
-            ./backend
-
-      - name: Build frontend image
-        run: |
-          set -euo pipefail
-
-          docker build \
-            -t "${WEB_IMAGE}:${IMAGE_TAG}" \
-            ./frontend
-
-      - name: Scan backend image before publishing
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/finance-api:${{ github.sha }}
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-
-      - name: Scan frontend image before publishing
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/finance-web:${{ github.sha }}
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push images
-        run: |
-          set -euo pipefail
-
-          docker push "${API_IMAGE}:${IMAGE_TAG}"
-          docker push "${WEB_IMAGE}:${IMAGE_TAG}"
-
-      - name: Resolve immutable image digests
-        id: image-digests
-        run: |
-          set -euo pipefail
-
-          API_DIGEST="$(
-            docker buildx imagetools inspect "${API_IMAGE}:${IMAGE_TAG}" |
-              awk '$1 == "Digest:" {print $2; exit}'
-          )"
-
-          WEB_DIGEST="$(
-            docker buildx imagetools inspect "${WEB_IMAGE}:${IMAGE_TAG}" |
-              awk '$1 == "Digest:" {print $2; exit}'
-          )"
-
-          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-
-          echo "api_digest=$API_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "web_digest=$WEB_DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Update Kubernetes image references
-        env:
-          API_DIGEST: ${{ steps.image-digests.outputs.api_digest }}
-          WEB_DIGEST: ${{ steps.image-digests.outputs.web_digest }}
-        run: |
-          set -euo pipefail
-
-          # Fail safely if the manifests contain more than one image.
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]]
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]]
-
-          sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_IMAGE}:${IMAGE_TAG}@${API_DIGEST}|" \
-            k8s/backend.yaml
-
-          sed -i -E \
-            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_IMAGE}:${IMAGE_TAG}@${WEB_DIGEST}|" \
-            k8s/frontend.yaml
-
-          git diff --check
-
-          echo "=== BACKEND IMAGE ==="
-          grep -n 'image:' k8s/backend.yaml
-
-          echo "=== FRONTEND IMAGE ==="
-          grep -n 'image:' k8s/frontend.yaml
-
-      - name: Commit and push GitOps changes
-        run: |
-          set -euo pipefail
-
-          if git diff --quiet -- k8s/backend.yaml k8s/frontend.yaml; then
-            echo "No manifest changes detected."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add k8s/backend.yaml k8s/frontend.yaml
-
-          git commit -m "chore: pin application images by digest"
-
-          git push origin HEAD:main
+          test -f .github/scripts/verify-image-digests.sh
+          bash .github/scripts/verify-image-digests.sh
