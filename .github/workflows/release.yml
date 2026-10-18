@@ -78,6 +78,35 @@ jobs:
           set -euo pipefail
           docker build --tag "${WEB_IMAGE}:${VERSION}" ./frontend
 
+      - name: Prepare SBOM output directory
+        run: mkdir -p sbom
+
+      - name: Generate backend image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.API_IMAGE }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom/finance-api.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate frontend image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.WEB_IMAGE }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom/finance-web.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload release SBOM artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sboms-${{ env.VERSION }}
+          path: sbom/*.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Scan backend image before publishing
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -203,6 +232,9 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           token: ${{ steps.app-token.outputs.token }}
+          files: |
+            sbom/finance-api.spdx.json
+            sbom/finance-web.spdx.json
           generate_release_notes: true
           prerelease: ${{ contains(env.VERSION, '-') }}
           make_latest: ${{ !contains(env.VERSION, '-') }}
