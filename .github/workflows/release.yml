@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 40
 
     permissions:
-      contents: write
+      contents: read
       packages: write
 
     env:
@@ -202,6 +202,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          token: ${{ steps.app-token.outputs.token }}
           generate_release_notes: true
           prerelease: ${{ contains(env.VERSION, '-') }}
           make_latest: ${{ !contains(env.VERSION, '-') }}
