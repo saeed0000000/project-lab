@@ -1,0 +1,93 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: post-deploy-smoke-test
+  namespace: default
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded,BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: post-deploy-smoke-test
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke-test
+          image: curlimages/curl@sha256:a134550be58ab783810e613ae96fd253c38f7bdd16d9bf9be350700c7a29ac06
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set -eu
+
+              curl_retry() {
+                curl --fail --silent --show-error \
+                  --retry 5 \
+                  --retry-connrefused \
+                  --retry-delay 2 \
+                  --retry-max-time 20 \
+                  --connect-timeout 3 \
+                  --max-time 10 \
+                  "$1"
+              }
+
+              echo "==> Smoke test: Backend /health"
+              health="$(curl_retry http://backend:3000/health)"
+              printf '%s\n' "$health" |
+                grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'
+              echo "PASS: Backend /health"
+
+              echo "==> Smoke test: Backend /ready"
+              ready="$(curl_retry http://backend:3000/ready)"
+              printf '%s\n' "$ready" |
+                grep -Eq '"status"[[:space:]]*:[[:space:]]*"ready"'
+              printf '%s\n' "$ready" |
+                grep -Eq '"database"[[:space:]]*:[[:space:]]*"ok"'
+              echo "PASS: Backend /ready and database status"
+
+              echo "==> Smoke test: Frontend /"
+              status="$(
+                curl --silent --show-error \
+                  --output /dev/null \
+                  --write-out '%{http_code}' \
+                  --retry 5 \
+                  --retry-connrefused \
+                  --retry-delay 2 \
+                  --retry-max-time 20 \
+                  --connect-timeout 3 \
+                  --max-time 10 \
+                  http://frontend/
+              )"
+
+              if [ "$status" != "200" ]; then
+                echo "FAIL: Frontend returned HTTP $status" >&2
+                exit 1
+              fi
+
+              echo "PASS: Frontend HTTP 200"
+              echo "All post-deployment smoke tests passed."
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
