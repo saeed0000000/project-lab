@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout tagged commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -56,7 +56,7 @@ jobs:
 
       - name: Create GitHub App token for CI-triggering pull request
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -66,7 +66,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build backend image
         run: |
@@ -79,7 +79,7 @@ jobs:
           docker build --tag "${WEB_IMAGE}:${VERSION}" ./frontend
 
       - name: Scan backend image before publishing
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.API_IMAGE }}:${{ env.VERSION }}
           format: table
@@ -89,7 +89,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan frontend image before publishing
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.WEB_IMAGE }}:${{ env.VERSION }}
           format: table
@@ -99,7 +99,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -178,7 +178,7 @@ jobs:
 
       - name: Open GitOps pull request
         id: gitops-pr
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: automation/deploy-${{ env.VERSION }}
@@ -200,7 +200,7 @@ jobs:
             Please review the manifest diff and required CI checks before merging. Argo CD tracks `main`, so the deployment becomes desired state only after this pull request is merged.
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           prerelease: ${{ contains(env.VERSION, '-') }}
