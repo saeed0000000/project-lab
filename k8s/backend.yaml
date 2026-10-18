@@ -29,7 +29,7 @@ spec:
 
       containers:
         - name: backend
-          image: ghcr.io/saeed0000000/finance-api:v1.0.8@sha256:fbbf231a7f81ff6828b4bed960dacbcb43666e0e9237c767b1483a7a347b72b0
+          image: ghcr.io/saeed0000000/finance-api:v1.0.9-rc.1@sha256:0f91f7863edefd86ecf85ee4db22ed949f7834e7ddfd5d763a39bd96d7be9799
           imagePullPolicy: IfNotPresent
 
           securityContext:
