@@ -74,6 +74,35 @@ jobs:
             --tag "finance-web:${GITHUB_SHA}" \
             ./frontend
 
+      - name: Prepare SBOM output directory
+        run: mkdir -p sbom
+
+      - name: Generate backend image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: finance-api:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom/finance-api.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate frontend image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: finance-web:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom/finance-web.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload container SBOMs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-sboms-${{ github.sha }}
+          path: sbom/*.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Scan backend image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
