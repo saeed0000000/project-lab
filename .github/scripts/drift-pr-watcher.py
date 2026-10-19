@@ -213,16 +213,22 @@ def signature_for(target: dict[str, Any], changes: dict[str, Any]) -> str:
 def create_pr(target: dict[str, Any], changes: dict[str, Any]) -> bool:
     suffix = signature_for(target, changes)
     slug = re.sub(r"[^a-z0-9-]+", "-", f"{target['kind']}-{target['name']}".lower()).strip("-")
-    branch = f"automation/drift-{slug}-{suffix}"
+    branch_base = f"automation/drift-{slug}-{suffix}"
 
+    # Suppress duplicate OPEN PRs for the same proposed field values.
+    # A closed/merged historical PR must not block a future proposal.
     previous_prs = run([
-        "gh", "pr", "list", "--repo", REPO, "--state", "all",
-        "--json", "headRefName,url,state", "--limit", "100",
+        "gh", "pr", "list", "--repo", REPO, "--state", "open",
+        "--json", "headRefName,url", "--limit", "100",
     ], capture=True)
     for pr in json.loads(previous_prs.stdout):
-        if pr.get("headRefName") == branch:
-            print(f"PR already exists ({pr.get('state')}): {pr.get('url')}", flush=True)
+        existing_branch = pr.get("headRefName", "")
+        if existing_branch == branch_base or existing_branch.startswith(branch_base + "-"):
+            print(f"Open PR already exists: {pr.get('url')}", flush=True)
             return True
+
+    # Use a unique branch for each new proposal, avoiding old closed branch refs.
+    branch = f"{branch_base}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
 
     remote = run(["git", "remote", "get-url", "origin"], capture=True).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="drift-pr-") as tmp:
