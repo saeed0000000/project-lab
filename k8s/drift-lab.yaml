@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drift-lab
+  namespace: default
+  labels:
+    app: drift-lab
+data:
+  mode: baseline
+  owner: git
