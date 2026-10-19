@@ -369,6 +369,11 @@ def watch_target(target: dict[str, Any], events: queue.Queue, stop: threading.Ev
             stop.wait(3)
 
 
+def kubernetes_resource_ref(target: dict[str, Any]) -> str:
+    resource = "configmaps" if target["kind"] == "ConfigMap" else "deployments"
+    return f"{resource}/{target['name']}"
+
+
 def main() -> None:
     if not (ROOT / ".git").exists():
         raise SystemExit(f"Run from the project repository; expected Git work tree at {ROOT}")
@@ -378,14 +383,33 @@ def main() -> None:
     targets = validate_policy(policy)
 
     for target in targets:
-        for verb in ("watch",):
-            resource = "configmaps" if target["kind"] == "ConfigMap" else "deployments"
-            allowed = run(["kubectl", "auth", "can-i", verb, resource, "-n", target["namespace"]], capture=True).stdout.strip()
+        resource_ref = kubernetes_resource_ref(target)
+
+        for verb in ("get", "watch"):
+            allowed = run(
+                [
+                    "kubectl",
+                    "auth",
+                    "can-i",
+                    verb,
+                    resource_ref,
+                    "-n",
+                    target["namespace"],
+                ],
+                capture=True,
+            ).stdout.strip()
+
             if allowed != "yes":
-                raise SystemExit(f"Missing permission to {verb} {resource} in {target['namespace']}")
+                raise SystemExit(
+                    f"Missing permission to {verb} "
+                    f"{resource_ref} in {target['namespace']}"
+                )
+
         print(
-            f"Watching {target['kind']}/{target['name']} in {target['namespace']} "
-            f"for fields: {', '.join(target['fields'])}", flush=True,
+            f"Watching {target['kind']}/{target['name']} in "
+            f"{target['namespace']} for fields: "
+            f"{', '.join(target['fields'])}",
+            flush=True,
         )
 
     events: queue.Queue = queue.Queue()

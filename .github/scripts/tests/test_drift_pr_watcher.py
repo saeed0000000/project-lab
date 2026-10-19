@@ -22,9 +22,26 @@ class DriftWatcherTests(unittest.TestCase):
             "fields": ["data.mode"],
         }
 
+    def test_kubernetes_resource_ref_uses_named_resources(self):
+        self.assertEqual(
+            watcher.kubernetes_resource_ref(self.configmap_target),
+            "configmaps/drift-lab",
+        )
+
+        deployment_target = {
+            "kind": "Deployment",
+            "name": "replicas-lab",
+        }
+
+        self.assertEqual(
+            watcher.kubernetes_resource_ref(deployment_target),
+            "deployments/replicas-lab",
+        )
+
     def test_get_path_returns_nested_value(self):
         obj = {"data": {"mode": "baseline"}}
         self.assertEqual(watcher.get_path(obj, "data.mode"), "baseline")
+
 
     def test_get_path_marks_missing_field(self):
         self.assertIs(
