@@ -6,5 +6,5 @@ metadata:
   labels:
     app: drift-lab
 data:
-  mode: manual-test
+  mode: v2-test
   owner: git
