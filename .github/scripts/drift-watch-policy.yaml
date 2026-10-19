@@ -1,0 +1,9 @@
+version: 1
+targets:
+  # Begin with this non-sensitive lab ConfigMap only.
+  - kind: ConfigMap
+    namespace: default
+    name: drift-lab
+    manifest: k8s/drift-lab.yaml
+    fields:
+      - data.mode

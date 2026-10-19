@@ -44,6 +44,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Validate drift watcher syntax
+        run: python3 -c 'from pathlib import Path; compile(Path(".github/scripts/drift-pr-watcher.py").read_text(), ".github/scripts/drift-pr-watcher.py", "exec")'
+
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
