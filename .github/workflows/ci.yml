@@ -44,8 +44,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Validate drift watcher syntax
-        run: python3 -c 'from pathlib import Path; compile(Path(".github/scripts/drift-pr-watcher.py").read_text(), ".github/scripts/drift-pr-watcher.py", "exec")'
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install drift watcher test dependency
+        run: python -m pip install --disable-pip-version-check --no-input "PyYAML==6.0.3"
+
+      - name: Run drift watcher unit tests
+        run: python -m unittest discover -s .github/scripts/tests -p 'test_*.py' -v
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
