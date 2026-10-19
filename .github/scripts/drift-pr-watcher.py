@@ -234,6 +234,7 @@ def create_pr(target: dict[str, Any], changes: dict[str, Any]) -> bool:
     with tempfile.TemporaryDirectory(prefix="drift-pr-") as tmp:
         clone = Path(tmp) / "repo"
         run(["git", "clone", "--quiet", "--branch", "main", "--single-branch", remote, str(clone)])
+        run(["git", "switch", "-c", branch], cwd=clone)
         manifest_path = clone / target["manifest"]
         manifest_text = manifest_path.read_text(encoding="utf-8")
 
