@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import re
 import subprocess
@@ -15,7 +16,8 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("DRIFT_REPO_DIR", str(DEFAULT_ROOT))).resolve()
 POLICY_FILE = Path(__file__).with_name("drift-watch-policy.yaml")
 REPO = "saeed0000000/project-lab"
 MISSING = object()
