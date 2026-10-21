@@ -26,7 +26,8 @@ on:
       - '.github/workflows/release.yml'
       - '.github/dependabot.yml'
       - '.github/scripts/**'
-
+      - 'README.md'
+      - 'docs/**'
 permissions:
   contents: read
 
