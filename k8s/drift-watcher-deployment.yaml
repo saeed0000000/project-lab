@@ -32,12 +32,18 @@ spec:
 
       containers:
         - name: drift-watcher
-          image: ghcr.io/saeed0000000/project-lab-drift-watcher@sha256:609f71679e18795f83cdfca741fdf44353e1748db62596650d6691c2e99bc9c9
+          image: ghcr.io/saeed0000000/project-lab-drift-watcher@sha256:e6291eb74ea1646605da4d59d3d9e58077592279c49c359757d4fb83b73d52d0
           imagePullPolicy: IfNotPresent
 
           env:
             - name: DRIFT_REPO_DIR
-              value: /work/project-lab
+              value: /work/repository
+            - name: DRIFT_GITHUB_REPOSITORY
+              value: "saeed0000000/project-lab"
+            - name: DRIFT_REPO_URL
+              value: "https://github.com/saeed0000000/project-lab.git"
+            - name: DRIFT_DEFAULT_BRANCH
+              value: "main"
 
             - name: GH_TOKEN
               valueFrom:
