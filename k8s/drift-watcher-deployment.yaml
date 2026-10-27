@@ -32,7 +32,7 @@ spec:
 
       containers:
         - name: drift-watcher
-          image: ghcr.io/saeed0000000/project-lab-drift-watcher@sha256:609f71679e18795f83cdfca741fdf44353e1748db62596650d6691c2e99bc9c9
+          image: ghcr.io/saeed0000000/project-lab-drift-watcher@sha256:e6291eb74ea1646605da4d59d3d9e58077592279c49c359757d4fb83b73d52d0
           imagePullPolicy: IfNotPresent
 
           env:
