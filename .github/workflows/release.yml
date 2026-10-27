@@ -26,8 +26,7 @@ jobs:
 
     env:
       VERSION: ${{ github.ref_name }}
-      API_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-api
-      WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/finance-web
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
     steps:
       - name: Checkout tagged commit
@@ -35,8 +34,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Prepare repository-specific image names
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          repo_name="${repo_name,,}"
+          echo "API_IMAGE=ghcr.io/${owner}/${repo_name}-api" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=ghcr.io/${owner}/${repo_name}-web" >> "$GITHUB_ENV"
+          echo "Using default branch: ${DEFAULT_BRANCH}"
+
       - name: Validate release tag and source branch
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
@@ -45,16 +57,36 @@ jobs:
             exit 1
           fi
 
-          git fetch --no-tags origin main:refs/remotes/origin/main
+          AUTH_HEADER="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
+            fetch --no-tags origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          unset AUTH_HEADER
 
           TAG_COMMIT="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
-            echo "ERROR: Release tags must point to a commit contained in main."
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            echo "ERROR: Release tags must point to a commit contained in ${DEFAULT_BRANCH}."
             echo "Tag commit: $TAG_COMMIT"
             exit 1
           fi
 
-          echo "Validated release $VERSION from commit $TAG_COMMIT on main."
+          echo "Validated release $VERSION from commit $TAG_COMMIT on ${DEFAULT_BRANCH}."
+
+      - name: Validate GitHub App configuration
+        shell: bash
+        env:
+          APP_CLIENT_ID: ${{ vars.APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$APP_CLIENT_ID" ]]; then
+            echo "::error::Missing repository/org variable APP_CLIENT_ID. Configure it for this repository."
+            exit 1
+          fi
+          if [[ -z "$APP_PRIVATE_KEY" ]]; then
+            echo "::error::Missing repository/org secret APP_PRIVATE_KEY. Configure it for this repository."
+            exit 1
+          fi
 
       - name: Create GitHub App token for CI-triggering pull request
         id: app-token
@@ -63,7 +95,7 @@ jobs:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: project-lab
+          repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
 
@@ -248,12 +280,18 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "refs/tags/${VERSION}"
 
-      - name: Check out current main for GitOps update
+      - name: Check out current default branch for GitOps update
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          git checkout -B main origin/main
+          AUTH_HEADER="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
+            fetch --no-tags origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          unset AUTH_HEADER
+          git checkout -B "$DEFAULT_BRANCH" "refs/remotes/origin/${DEFAULT_BRANCH}"
       - name: Update Kubernetes image references
         env:
           API_DIGEST: ${{ steps.digest.outputs.api_digest }}
@@ -296,7 +334,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: automation/deploy-${{ env.VERSION }}
-          base: main
+          base: ${{ github.event.repository.default_branch }}
           delete-branch: true
           add-paths: |
             k8s/backend.yaml
@@ -311,7 +349,7 @@ jobs:
             - Backend: `${{ env.API_IMAGE }}:${{ env.VERSION }}@${{ steps.digest.outputs.api_digest }}`
             - Frontend: `${{ env.WEB_IMAGE }}:${{ env.VERSION }}@${{ steps.digest.outputs.web_digest }}`
 
-            Please review the manifest diff and required CI checks before merging. Argo CD tracks `main`, so the deployment becomes desired state only after this pull request is merged.
+            Please review the manifest diff and required CI checks before merging. Argo CD tracks `${{ github.event.repository.default_branch }}`, so the deployment becomes desired state only after this pull request is merged.
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
