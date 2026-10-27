@@ -37,7 +37,13 @@ spec:
 
           env:
             - name: DRIFT_REPO_DIR
-              value: /work/project-lab
+              value: /work/repository
+            - name: DRIFT_GITHUB_REPOSITORY
+              value: "saeed0000000/project-lab"
+            - name: DRIFT_REPO_URL
+              value: "https://github.com/saeed0000000/project-lab.git"
+            - name: DRIFT_DEFAULT_BRANCH
+              value: "main"
 
             - name: GH_TOKEN
               valueFrom:

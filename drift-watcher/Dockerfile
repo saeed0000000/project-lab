@@ -7,9 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/home/watcher \
     GH_CONFIG_DIR=/home/watcher/.config/gh \
-    DRIFT_REPO_DIR=/work/project-lab
-
-LABEL org.opencontainers.image.source="https://github.com/saeed0000000/project-lab"
+    DRIFT_REPO_DIR=/work/repository
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
