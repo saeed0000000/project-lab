@@ -19,7 +19,8 @@ import yaml
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ.get("DRIFT_REPO_DIR", str(DEFAULT_ROOT))).resolve()
 POLICY_FILE = Path(__file__).with_name("drift-watch-policy.yaml")
-REPO = "saeed0000000/project-lab"
+REPO = os.environ.get("DRIFT_GITHUB_REPOSITORY", "").strip()
+DEFAULT_BRANCH = os.environ.get("DRIFT_DEFAULT_BRANCH", "").strip()
 MISSING = object()
 ACTIVE_WATCHES: list[subprocess.Popen[str]] = []
 ACTIVE_WATCHES_LOCK = threading.Lock()
@@ -32,6 +33,38 @@ def run(args: list[str], *, cwd: Path = ROOT, capture: bool = False,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
+
+
+def repository_slug() -> str:
+    """Return owner/repository from the Deployment or origin remote."""
+    global REPO
+    if REPO:
+        return REPO
+    remote = run(["git", "remote", "get-url", "origin"], capture=True).stdout.strip()
+    match = re.search(r"(?:github\.com[:/])([^/\s]+/[^/\s]+?)(?:\.git)?$", remote)
+    if not match:
+        raise RuntimeError(f"Cannot determine GitHub owner/repository from origin URL: {remote!r}")
+    REPO = match.group(1).removesuffix(".git")
+    return REPO
+
+
+def default_branch() -> str:
+    """Return the configured branch or discover origin's default branch from GitHub."""
+    global DEFAULT_BRANCH
+    if DEFAULT_BRANCH:
+        return DEFAULT_BRANCH
+    result = run(["git", "ls-remote", "--symref", "origin", "HEAD"], capture=True)
+    for line in result.stdout.splitlines():
+        match = re.match(r"ref: refs/heads/(.+)\s+HEAD$", line.strip())
+        if match:
+            DEFAULT_BRANCH = match.group(1)
+            return DEFAULT_BRANCH
+    raise RuntimeError("Unable to discover the default branch for origin.")
+
+
+def fetch_default_branch() -> None:
+    branch = default_branch()
+    run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"])
 
 
 def split_documents(text: str) -> list[str]:
@@ -81,7 +114,7 @@ def get_path(obj: Any, dotted_path: str) -> Any:
 
 
 def read_git_manifest(path: str) -> str:
-    return run(["git", "show", f"origin/main:{path}"], capture=True).stdout
+    return run(["git", "show", f"origin/{default_branch()}:{path}"], capture=True).stdout
 
 
 def get_git_field(target: dict[str, Any], field: str) -> Any:
@@ -196,7 +229,7 @@ def validate_policy(policy: Any) -> list[dict[str, Any]]:
         text = read_git_manifest(target["manifest"])
         obj = find_target_document(text, target)
         if obj is None:
-            raise RuntimeError(f"{target['kind']}/{target['name']} not found in origin/main:{target['manifest']}")
+            raise RuntimeError(f"{target['kind']}/{target['name']} not found in origin/{default_branch()}:{target['manifest']}")
         for field in target["fields"]:
             if get_path(obj, field) is MISSING:
                 raise RuntimeError(f"Configured field {field!r} is missing in {target['manifest']}")
@@ -220,7 +253,7 @@ def create_pr(target: dict[str, Any], changes: dict[str, Any]) -> bool:
     # Suppress duplicate OPEN PRs for the same proposed field values.
     # A closed/merged historical PR must not block a future proposal.
     previous_prs = run([
-        "gh", "pr", "list", "--repo", REPO, "--state", "open",
+        "gh", "pr", "list", "--repo", repository_slug(), "--state", "open",
         "--json", "headRefName,url", "--limit", "100",
     ], capture=True)
     for pr in json.loads(previous_prs.stdout):
@@ -235,7 +268,7 @@ def create_pr(target: dict[str, Any], changes: dict[str, Any]) -> bool:
     remote = run(["git", "remote", "get-url", "origin"], capture=True).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="drift-pr-") as tmp:
         clone = Path(tmp) / "repo"
-        run(["git", "clone", "--quiet", "--branch", "main", "--single-branch", remote, str(clone)])
+        run(["git", "clone", "--quiet", "--branch", default_branch(), "--single-branch", remote, str(clone)])
         run(["git", "switch", "-c", branch], cwd=clone)
         manifest_path = clone / target["manifest"]
         manifest_text = manifest_path.read_text(encoding="utf-8")
@@ -283,7 +316,7 @@ def create_pr(target: dict[str, Any], changes: dict[str, Any]) -> bool:
             lines.append(f"| `{field}` | `{values['from']}` | `{values['to']}` |")
         lines.extend(["", "Argo CD remains the reconciler. This PR does not modify `main` directly."])
         result = run([
-            "gh", "pr", "create", "--repo", REPO, "--base", "main", "--head", branch,
+            "gh", "pr", "create", "--repo", repository_slug(), "--base", default_branch(), "--head", branch,
             "--title", f"gitops: capture drift in {target['kind']}/{target['name']}",
             "--body", "\n".join(lines),
         ], cwd=clone, capture=True)
@@ -299,7 +332,7 @@ def process_event(target: dict[str, Any], event: dict[str, Any], proposed: set[s
     if not matches_target(obj, target):
         return
 
-    run(["git", "fetch", "--quiet", "origin", "main"])
+    fetch_default_branch()
     differences: dict[str, Any] = {}
     for field in target["fields"]:
         live_value = get_path(obj, field)
@@ -380,7 +413,8 @@ def main() -> None:
     if not (ROOT / ".git").exists():
         raise SystemExit(f"Run from the project repository; expected Git work tree at {ROOT}")
     run(["gh", "auth", "status"])
-    run(["git", "fetch", "--quiet", "origin", "main"])
+    print(f"Drift watcher repository: {repository_slug()} (default branch: {default_branch()})", flush=True)
+    fetch_default_branch()
     policy = yaml.safe_load(POLICY_FILE.read_text(encoding="utf-8"))
     targets = validate_policy(policy)
 

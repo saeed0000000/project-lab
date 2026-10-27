@@ -2,9 +2,13 @@ name: Build Drift Watcher Image
 
 on:
   push:
+    branches:
+      - "**"
     paths:
       - ".dockerignore"
       - "drift-watcher/**"
+      - "argocd/**"
+      - ".github/scripts/prepare-repository-portability.py"
       - ".github/scripts/drift-pr-watcher.py"
       - ".github/scripts/drift-watch-policy.yaml"
       - ".github/workflows/drift-watcher-image.yml"
@@ -19,8 +23,6 @@ jobs:
   build:
     name: Build and publish image
     runs-on: ubuntu-latest
-
-    # لا تنشر الصورة إلا من الفرع الافتراضي، حتى عند التشغيل اليدوي.
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
 
     steps:
@@ -29,10 +31,38 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate GitHub App configuration
+        shell: bash
+        env:
+          APP_CLIENT_ID: ${{ vars.APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$APP_CLIENT_ID" ]] || {
+            echo "::error::Missing repository/org variable APP_CLIENT_ID."
+            exit 1
+          }
+          [[ -n "$APP_PRIVATE_KEY" ]] || {
+            echo "::error::Missing repository/org secret APP_PRIVATE_KEY."
+            exit 1
+          }
+
+      - name: Create GitHub App token for digest-update pull request
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Set image name
         id: image
         shell: bash
         run: |
+          set -euo pipefail
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${REPO_NAME,,}-drift-watcher" >> "$GITHUB_OUTPUT"
 
@@ -70,13 +100,63 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-
-          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "ERROR: Invalid Drift Watcher image digest: $DIGEST"
+            exit 1
+          }
           {
             echo "## Drift watcher image published"
             echo
             echo 'Immutable image reference:'
             echo
-            echo "\`${IMAGE}@${DIGEST}\`"
+            printf '  `%s`\n' "${IMAGE}@${DIGEST}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update deployment to the published immutable digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          manifest=k8s/drift-watcher-deployment.yaml
+          matches="$(grep -Ec '^[[:space:]]*image:[[:space:]]*ghcr\.io/[^[:space:]]+-drift-watcher@sha256:[0-9a-f]{64}[[:space:]]*$' "$manifest" || true)"
+          [[ "$matches" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one pinned Drift Watcher image in $manifest; found $matches."
+            exit 1
+          }
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*)ghcr\.io/[^[:space:]]+-drift-watcher@sha256:[0-9a-f]{64}([[:space:]]*)$|\1${IMAGE}@${DIGEST}\2|" \
+            "$manifest"
+          git diff --check
+          bash .github/scripts/verify-image-digests.sh
+
+      - name: Open pull request to pin Drift Watcher image digest
+        id: digest-pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: automation/pin-drift-watcher-${{ github.sha }}
+          base: ${{ github.event.repository.default_branch }}
+          delete-branch: true
+          add-paths: k8s/drift-watcher-deployment.yaml
+          commit-message: "chore(gitops): pin Drift Watcher image digest"
+          title: "chore(gitops): pin Drift Watcher image digest"
+          body: |
+            ## Immutable Drift Watcher image update
+
+            This pull request updates `k8s/drift-watcher-deployment.yaml` to the image digest built and published by this workflow.
+
+            - Repository: `${{ github.repository }}`
+            - Source commit: `${{ github.sha }}`
+            - Image: `${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}`
+
+            Review the manifest diff and required CI checks before merging. The deployment remains digest-pinned.
+
+      - name: Report digest pull request
+        if: steps.digest-pr.outputs.pull-request-url != ''
+        env:
+          PR_URL: ${{ steps.digest-pr.outputs.pull-request-url }}
+        run: |
+          echo "Drift Watcher digest update PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
