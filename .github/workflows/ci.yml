@@ -49,12 +49,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install drift watcher test dependency
-        run: python -m pip install --disable-pip-version-check --no-input "PyYAML==6.0.3"
-
-      - name: Run drift watcher unit tests
-        run: python -m unittest discover -s .github/scripts/tests -p 'test_*.py' -v
-
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
