@@ -27,6 +27,15 @@ jobs:
     env:
       VERSION: ${{ github.ref_name }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      # Optional repository variables; defaults preserve project-lab's current layout.
+      API_CONTEXT: ${{ vars.RELEASE_API_CONTEXT || 'backend' }}
+      WEB_CONTEXT: ${{ vars.RELEASE_WEB_CONTEXT || 'frontend' }}
+      API_DOCKERFILE: ${{ vars.RELEASE_API_DOCKERFILE || 'backend/Dockerfile' }}
+      WEB_DOCKERFILE: ${{ vars.RELEASE_WEB_DOCKERFILE || 'frontend/Dockerfile' }}
+      API_MANIFEST: ${{ vars.RELEASE_API_MANIFEST || 'k8s/backend.yaml' }}
+      WEB_MANIFEST: ${{ vars.RELEASE_WEB_MANIFEST || 'k8s/frontend.yaml' }}
+      API_IMAGE_REPOSITORY: ${{ vars.RELEASE_API_IMAGE_REPOSITORY }}
+      WEB_IMAGE_REPOSITORY: ${{ vars.RELEASE_WEB_IMAGE_REPOSITORY }}
 
     steps:
       - name: Checkout tagged commit
@@ -41,9 +50,23 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo_name="${GITHUB_REPOSITORY#*/}"
           repo_name="${repo_name,,}"
-          echo "API_IMAGE=ghcr.io/${owner}/${repo_name}-api" >> "$GITHUB_ENV"
-          echo "WEB_IMAGE=ghcr.io/${owner}/${repo_name}-web" >> "$GITHUB_ENV"
+
+          api_image="${API_IMAGE_REPOSITORY:-ghcr.io/${owner}/${repo_name}-api}"
+          web_image="${WEB_IMAGE_REPOSITORY:-ghcr.io/${owner}/${repo_name}-web}"
+
+          for image in "$api_image" "$web_image"; do
+            if [[ ! "$image" =~ ^ghcr\.io/[a-z0-9][a-z0-9._/-]*$ || "$image" == */ || "$image" == *//* ]]; then
+              echo "::error::Invalid GHCR image repository: $image"
+              echo "Use a lowercase ghcr.io/owner/image path without a tag or digest."
+              exit 1
+            fi
+          done
+
+          echo "API_IMAGE=$api_image" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=$web_image" >> "$GITHUB_ENV"
           echo "Using default branch: ${DEFAULT_BRANCH}"
+          echo "Backend context: ${API_CONTEXT}; manifest: ${API_MANIFEST}"
+          echo "Frontend context: ${WEB_CONTEXT}; manifest: ${WEB_MANIFEST}"
 
       - name: Validate release tag and source branch
         shell: bash
@@ -71,6 +94,36 @@ jobs:
           fi
 
           echo "Validated release $VERSION from commit $TAG_COMMIT on ${DEFAULT_BRANCH}."
+
+      - name: Validate configurable release paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ -d "$API_CONTEXT" ]] || { echo "::error::Backend build context not found: $API_CONTEXT"; exit 1; }
+          [[ -d "$WEB_CONTEXT" ]] || { echo "::error::Frontend build context not found: $WEB_CONTEXT"; exit 1; }
+          [[ -f "$API_DOCKERFILE" ]] || { echo "::error::Backend Dockerfile not found: $API_DOCKERFILE"; exit 1; }
+          [[ -f "$WEB_DOCKERFILE" ]] || { echo "::error::Frontend Dockerfile not found: $WEB_DOCKERFILE"; exit 1; }
+          [[ -f "$API_MANIFEST" ]] || { echo "::error::Backend manifest not found: $API_MANIFEST"; exit 1; }
+          [[ -f "$WEB_MANIFEST" ]] || { echo "::error::Frontend manifest not found: $WEB_MANIFEST"; exit 1; }
+          [[ "$API_MANIFEST" != "$WEB_MANIFEST" ]] || {
+            echo "::error::Backend and frontend manifests must be different files."
+            exit 1
+          }
+
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' "$API_MANIFEST")" -eq 1 ]] || {
+            echo "::error::Expected exactly one image line in $API_MANIFEST"
+            exit 1
+          }
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' "$WEB_MANIFEST")" -eq 1 ]] || {
+            echo "::error::Expected exactly one image line in $WEB_MANIFEST"
+            exit 1
+          }
+
+          test -f .github/scripts/verify-image-digests.sh || {
+            echo "::error::Missing .github/scripts/verify-image-digests.sh security validation script."
+            exit 1
+          }
 
       - name: Validate GitHub App configuration
         shell: bash
@@ -105,12 +158,12 @@ jobs:
       - name: Build backend image
         run: |
           set -euo pipefail
-          docker build --tag "${API_IMAGE}:${VERSION}" ./backend
+          docker build --file "$API_DOCKERFILE" --tag "${API_IMAGE}:${VERSION}" "$API_CONTEXT"
 
       - name: Build frontend image
         run: |
           set -euo pipefail
-          docker build --tag "${WEB_IMAGE}:${VERSION}" ./frontend
+          docker build --file "$WEB_DOCKERFILE" --tag "${WEB_IMAGE}:${VERSION}" "$WEB_CONTEXT"
 
       - name: Prepare SBOM output directory
         run: mkdir -p sbom
@@ -120,7 +173,7 @@ jobs:
         with:
           image: ${{ env.API_IMAGE }}:${{ env.VERSION }}
           format: spdx-json
-          output-file: sbom/finance-api.spdx.json
+          output-file: sbom/api.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
@@ -129,7 +182,7 @@ jobs:
         with:
           image: ${{ env.WEB_IMAGE }}:${{ env.VERSION }}
           format: spdx-json
-          output-file: sbom/finance-web.spdx.json
+          output-file: sbom/web.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
@@ -300,33 +353,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$API_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ERROR: Invalid backend digest"; exit 1; }
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "ERROR: Invalid frontend digest"; exit 1; }
 
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/backend.yaml)" -eq 1 ]] || {
-            echo "ERROR: Expected exactly one image line in k8s/backend.yaml"
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' "$API_MANIFEST")" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in $API_MANIFEST"
             exit 1
           }
-          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' k8s/frontend.yaml)" -eq 1 ]] || {
-            echo "ERROR: Expected exactly one image line in k8s/frontend.yaml"
+          [[ "$(grep -Ec '^[[:space:]]*image:[[:space:]]*' "$WEB_MANIFEST")" -eq 1 ]] || {
+            echo "ERROR: Expected exactly one image line in $WEB_MANIFEST"
             exit 1
           }
 
           sed -i -E \
             "s|^([[:space:]]*image:[[:space:]]*).*$|\1${API_IMAGE}:${VERSION}@${API_DIGEST}|" \
-            k8s/backend.yaml
+            "$API_MANIFEST"
           sed -i -E \
             "s|^([[:space:]]*image:[[:space:]]*).*$|\1${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}|" \
-            k8s/frontend.yaml
+            "$WEB_MANIFEST"
 
-          grep -F "image: ${API_IMAGE}:${VERSION}@${API_DIGEST}" k8s/backend.yaml
-          grep -F "image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}" k8s/frontend.yaml
+          grep -F "image: ${API_IMAGE}:${VERSION}@${API_DIGEST}" "$API_MANIFEST"
+          grep -F "image: ${WEB_IMAGE}:${VERSION}@${WEB_DIGEST}" "$WEB_MANIFEST"
 
           git diff --check
-          bash .github/scripts/verify-image-digests.sh
+          bash .github/scripts/verify-image-digests.sh "$API_MANIFEST" "$WEB_MANIFEST"
 
           echo "=== Proposed GitOps diff ==="
-          git --no-pager diff -- k8s/backend.yaml k8s/frontend.yaml
+          git --no-pager diff -- "$API_MANIFEST" "$WEB_MANIFEST"
 
       - name: Open GitOps pull request
         id: gitops-pr
@@ -337,8 +390,8 @@ jobs:
           base: ${{ github.event.repository.default_branch }}
           delete-branch: true
           add-paths: |
-            k8s/backend.yaml
-            k8s/frontend.yaml
+            ${{ env.API_MANIFEST }}
+            ${{ env.WEB_MANIFEST }}
           commit-message: "release: propose deployment of ${{ env.VERSION }}"
           title: "deploy: ${{ env.VERSION }}"
           body: |
@@ -356,8 +409,8 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           files: |
-            sbom/finance-api.spdx.json
-            sbom/finance-web.spdx.json
+            sbom/api.spdx.json
+            sbom/web.spdx.json
           generate_release_notes: true
           prerelease: ${{ contains(env.VERSION, '-') }}
           make_latest: ${{ !contains(env.VERSION, '-') }}
