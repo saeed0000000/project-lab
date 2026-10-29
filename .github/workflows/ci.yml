@@ -14,6 +14,8 @@ on:
       - '.github/workflows/release.yml'
       - '.github/dependabot.yml'
       - '.github/scripts/**'
+      - '**/*.yaml'
+      - '**/*.yml'
 
   push:
     branches:
@@ -28,6 +30,8 @@ on:
       - '.github/workflows/release.yml'
       - '.github/dependabot.yml'
       - '.github/scripts/**'
+      - '**/*.yaml'
+      - '**/*.yml'
       - 'README.md'
       - 'docs/**'
 permissions:
@@ -130,7 +134,15 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Verify Kubernetes image digests
+        env:
+          API_MANIFEST: ${{ vars.RELEASE_API_MANIFEST || 'k8s/backend.yaml' }}
+          WEB_MANIFEST: ${{ vars.RELEASE_WEB_MANIFEST || 'k8s/frontend.yaml' }}
         run: |
           set -euo pipefail
           test -f .github/scripts/verify-image-digests.sh
+
+          # Preserve validation of all existing k8s/ manifests.
           bash .github/scripts/verify-image-digests.sh
+
+          # Also validate the manifests selected for the release workflow.
+          bash .github/scripts/verify-image-digests.sh             "$API_MANIFEST"             "$WEB_MANIFEST"
