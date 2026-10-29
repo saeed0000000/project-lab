@@ -42,15 +42,3 @@ password: Demo123!
 15. Create staging and production overlays with Kustomize.
 # project-lab
 # project-lab
-
-
-## GitOps Drift Watcher
-
-This repository also contains a Kubernetes GitOps drift-detection lab.
-
-The watcher monitors explicitly allow-listed Kubernetes resource fields and opens GitHub Pull Requests when live values differ from the manifests in Git. Argo CD remains responsible for reconciliation.
-
-- [Architecture, validation results, and reproduction guide](docs/drift-watcher-architecture.md)
-- [Drift watcher implementation](.github/scripts/drift-pr-watcher.py)
-- [Monitoring policy](.github/scripts/drift-watch-policy.yaml)
-- [Kubernetes Deployment](k8s/drift-watcher-deployment.yaml)
